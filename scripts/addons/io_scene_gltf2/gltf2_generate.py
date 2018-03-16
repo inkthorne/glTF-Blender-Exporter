@@ -588,12 +588,7 @@ def generate_animations(operator,
     Generates the top level animations, channels and samplers entry.
     """
 
-    def process_object_animations(blender_object):
-        if blender_object.animation_data is None:
-            return
-
-        blender_action = blender_object.animation_data.action
-
+    def process_object_animation(blender_object, blender_action, channels, samplers):
         if blender_action is None:
             return
 
@@ -688,6 +683,79 @@ def generate_animations(operator,
                         matrix_basis,
                         False
                     )
+    
+    def process_object_action(blender_object):
+        if blender_object.animation_data is None:
+            return
+
+        blender_action = blender_object.animation_data.action
+        process_object_animation(blender_object, blender_action, channels, samplers)
+
+    def process_object_nlas(blender_object, nla_animations):
+        """
+        Iterate through all of the NLA tracks and make animations out of their actions.
+        Append the newly created animations to 'nla_animations'.
+        """
+        if blender_object.animation_data is None:
+            return
+
+        nla_tracks = blender_object.animation_data.nla_tracks
+
+        if nla_tracks is None:
+            return
+
+        for nla_track in nla_tracks:
+            nla_channels = []
+            strips = nla_track.strips
+
+            if strips is not None and len(strips) == 1:
+                strip = strips[0]
+                blender_action = strip.action
+                process_object_animation(blender_object, blender_action, nla_channels, samplers)
+
+                if len(nla_channels) > 0:
+                    # Use the NLA track name as the animation name, if it's been changed from the default.
+                    if not nla_track.name.startswith("[Action Stash]") and not nla_track.name.startswith("NlaTrack"):
+                        nla_animation_name = nla_track.name
+                    # Otherwise, create a unique name for the animation from the object & action strip.
+                    else:
+                        nla_animation_name = blender_object.name + "_" + strip.name
+
+                    # Attempt to find an animation with the same name.
+                    nla_animation = None
+                    for animation in nla_animations:
+                        if animation['name'] == nla_animation_name:
+                            nla_animation = animation
+                            break
+
+                    # Combine animations with the same name.
+                    if nla_animation is not None:
+                        nla_animation['channels'] = nla_animation['channels'] + nla_channels
+                    # Otherwise, create a new animation.
+                    else:
+                        nla_animation = {
+                            'channels': nla_channels,
+                            'name': nla_animation_name,
+                        }
+                        nla_animations.append(nla_animation)
+
+    def add_animation_samplers(animation, all_samplers):
+        """
+        Add the samplers[] to the glTF animation (only the samplers that the channels reference).
+        """
+        samplers = []
+        sampler_index = 0
+        
+        for channel in animation['channels']:
+            sampler = all_samplers[channel['sampler']]
+            samplers.append(sampler)
+            channel['sampler'] = sampler_index
+            sampler_index += 1
+        
+        animation['samplers'] = samplers
+        
+    #
+    #
 
     animations = []
 
@@ -737,7 +805,7 @@ def generate_animations(operator,
         processed_meshes.append(blender_mesh)
 
     for blender_object in filtered_objects:
-        process_object_animations(blender_object)
+        process_object_action(blender_object)
         # Export morph targets animation data.
         if blender_object.type != 'MESH' or blender_object.data is None:
             continue
@@ -751,20 +819,30 @@ def generate_animations(operator,
     #
     #
 
-    if len(channels) > 0 or len(samplers) > 0:
+    # Export NLA tracks as individual animations.
+    nla_animations = []
+    for blender_object in filtered_objects:
+        process_object_nlas(blender_object, nla_animations)
 
+    # Add only the samplers to the animation that it uses.
+    for nla_animation in nla_animations:
+        add_animation_samplers(nla_animation, samplers)
+
+    if len(samplers) > 0:
         # Sampler 'name' is used to gather the index. However, 'name' is no property of sampler and has to be removed.
         for sampler in samplers:
             del sampler['name']
 
-        #
-
+    if len(channels) > 0:
         animation = {
             'channels': channels,
             'samplers': samplers
         }
-
+        add_animation_samplers(animation, samplers)
         animations.append(animation)
+
+    # Append the NLA animations to the animation list.
+    animations = animations + nla_animations
 
     #
     #
